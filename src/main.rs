@@ -63,7 +63,8 @@ const VALIDATION_LAYER: vk::ExtensionName =
 fn main() -> Result<()> {
     pretty_env_logger::init();
 
-    // Window
+    // Window test
+
 
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
@@ -324,7 +325,7 @@ unsafe fn create_instance(window: &Window, entry: &Entry, data: &mut AppData) ->
         .collect::<HashSet<_>>();
 
     if VALIDATION_ENABLED && !available_layers.contains(&VALIDATION_LAYER) {
-        return Err(anyhow!("Validation layer requested but not support."));
+        return Err(anyhow!("Validation layer requested but not supported."));
     }
 
     let layers = if VALIDATION_ENABLED {
