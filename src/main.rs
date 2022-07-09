@@ -468,7 +468,7 @@ unsafe fn create_pipeline(device: &Device, data: &mut AppData) -> Result<()> {
         .polygon_mode(vk::PolygonMode::FILL)
         .line_width(1.)
         .cull_mode(vk::CullModeFlags::BACK)
-        .front_face(vk::FrontFace::CLOCKWISE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .depth_bias_enable(false);
 
     let multisample_state = vk::PipelineMultisampleStateCreateInfo::builder()
@@ -497,10 +497,11 @@ unsafe fn create_pipeline(device: &Device, data: &mut AppData) -> Result<()> {
         vk::DynamicState::LINE_WIDTH
     ];
 
-    let dynamic_states = vk::PipelineDynamicStateCreateInfo::builder()
-        .dynamic_states(dynamic_states);
+    let dynamic_states = vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(dynamic_states);
 
-    let layout_info = vk::PipelineLayoutCreateInfo::builder();
+    let set_layouts = &[data.descriptor_set_layout];
+    let layout_info = vk::PipelineLayoutCreateInfo::builder().set_layouts(set_layouts);
+
     data.pipeline_layout = device.create_pipeline_layout(&layout_info, None)?;
 
     let stages = &[vert_stage, frag_stage];
@@ -630,7 +631,17 @@ unsafe fn create_command_buffers(device: &Device, data: &mut AppData) -> Result<
         device.cmd_bind_vertex_buffers(*command_buffer, 0, &[data.vertex_buffer], &[0]);
         device.cmd_bind_index_buffer(*command_buffer, data.index_buffer, 0, vk::IndexType::UINT16);
 
+        device.cmd_bind_descriptor_sets(
+            *command_buffer,
+            vk::PipelineBindPoint::GRAPHICS,
+            data.pipeline_layout,
+            0,
+            &[data.descriptor_sets[i]],
+            &[],
+        );
+
         device.cmd_draw_indexed(*command_buffer, INDICES.len() as u32, 1, 0, 0, 0);
+
 
         device.cmd_end_render_pass(*command_buffer);
 
@@ -862,14 +873,53 @@ unsafe fn create_descriptor_set_layout(device: &Device, data: &mut AppData) -> R
         .stage_flags(vk::ShaderStageFlags::VERTEX);
 
     let bindings = &[ubo_binding];
-    let info = vk::DescriptorSetLayoutCreateInfo::builder()
-        .bindings(bindings);
+    let info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(bindings);
 
     data.descriptor_set_layout = device.create_descriptor_set_layout(&info, None)?;
 
-    let set_layouts = &[data.descriptor_set_layout];
-    let layout_info = vk::PipelineLayoutCreateInfo::builder()
-        .set_layouts(set_layouts);
+    Ok(())
+}
+
+unsafe fn create_descriptor_pool(device: &Device, data: &mut AppData) -> Result<()> {
+    let ubo_size = vk::DescriptorPoolSize::builder()
+        .type_(vk::DescriptorType::UNIFORM_BUFFER)
+        .descriptor_count(data.swapchain_images.len() as u32);
+
+    let pool_sizes = &[ubo_size];
+    let info = vk::DescriptorPoolCreateInfo::builder()
+        .pool_sizes(pool_sizes)
+        .max_sets(data.swapchain_images.len() as u32);
+
+    data.descriptor_pool = device.create_descriptor_pool(&info, None)?;
+
+    Ok(())
+}
+
+unsafe fn create_descriptor_sets(device: &Device, data: &mut AppData) -> Result<()> {
+    let layouts = vec![data.descriptor_set_layout; data.swapchain_images.len()];
+    let info = vk::DescriptorSetAllocateInfo::builder()
+        .descriptor_pool(data.descriptor_pool)
+        .set_layouts(&layouts);
+
+    data.descriptor_sets = device.allocate_descriptor_sets(&info)?;
+
+    for i in 0..data.swapchain_images.len() {
+        let info = vk::DescriptorBufferInfo::builder()
+            .buffer(data.uniform_buffers[i])
+            .offset(0)
+            .range(size_of::<UniformBufferObject>() as u64);
+
+        let buffer_info = &[info];
+        let ubo_write = vk::WriteDescriptorSet::builder()
+            .dst_set(data.descriptor_sets[i])
+            .dst_binding(0)
+            .dst_array_element(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .buffer_info(buffer_info);
+
+        device.update_descriptor_sets(&[ubo_write], &[] as &[vk::CopyDescriptorSet]);
+    }
+
 
     Ok(())
 }
@@ -948,7 +998,9 @@ struct AppData {
     index_buffer: vk::Buffer,
     index_buffer_memory: vk::DeviceMemory,
     uniform_buffers: Vec<vk::Buffer>,
-    uniform_buffers_memory: Vec<vk::DeviceMemory>
+    uniform_buffers_memory: Vec<vk::DeviceMemory>,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_sets: Vec<vk::DescriptorSet>,
 }
 
 #[derive(Clone, Debug)]
@@ -982,6 +1034,8 @@ impl App {
         create_vertex_buffer(&instance, &device, &mut data)?;
         create_index_buffer(&instance, &device, &mut data)?;
         create_uniform_buffers(&instance, &device, &mut data)?;
+        create_descriptor_pool(&device, &mut data)?;
+        create_descriptor_sets(&device, &mut data)?;
         create_command_buffers(&device, &mut data)?;
         create_sync_objects(&device, &mut data)?;
         Ok(Self {
@@ -991,6 +1045,7 @@ impl App {
             device,
             frame: 0,
             resized: false,
+            start: Instant::now(),
         })
     }
     unsafe fn recreate_swapchain(&mut self, window: &Window) -> Result<()> {
@@ -1002,6 +1057,8 @@ impl App {
         create_pipeline(&self.device, &mut self.data)?;
         create_framebuffers(&self.device, &mut self.data)?;
         create_uniform_buffers(&self.instance, &self.device, &mut self.data)?;
+        create_descriptor_pool(&self.device, &mut self.data)?;
+        create_descriptor_sets(&self.device, &mut self.data)?;
         create_command_buffers(&self.device, &mut self.data)?;
         self.data
             .images_in_flight
@@ -1137,6 +1194,7 @@ impl App {
     }
     /// Destroys the swapchain
     unsafe fn destroy_swapchain(&mut self) {
+        self.device.destroy_descriptor_pool(self.data.descriptor_pool, None);
         self.data.uniform_buffers
             .iter()
             .for_each(|b| self.device.destroy_buffer(*b, None));
